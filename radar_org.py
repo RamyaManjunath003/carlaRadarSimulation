@@ -6,7 +6,9 @@ import random
 import cv2
 import math
 import time
+import queue
 import open3d as o3d
+import numpy as np
 from matplotlib import cm
 
 try:
@@ -35,6 +37,36 @@ VID_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
 COOL_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
 COOL = np.array(cm.get_cmap('winter')(COOL_RANGE))
 COOL = COOL[:,:3]
+
+class BoundingBoxGenerator():
+    def build_projection_matrix(w, h, fov):
+        focal = w / (2.0 * np.tan(fov * np.pi / 360.0))
+        K = np.identity(3)
+        K[0, 0] = K[1, 1] = focal
+        K[0, 2] = w / 2.0
+        K[1, 2] = h / 2.0
+        return K
+
+    def get_image_point(loc, K, w2c):
+        # Calculate 2D projection of 3D coordinate
+
+        # Format the input coordinate (loc is a carla.Position object)
+        point = np.array([loc.x, loc.y, loc.z, 1])
+        # transform to camera coordinates
+        point_camera = np.dot(w2c, point)
+
+        # New we must change from UE4's coordinate system to an "standard"
+        # (x, y ,z) -> (y, -z, x)
+        # and we remove the fourth componebonent also
+        point_camera = [point_camera[1], -point_camera[2], point_camera[0]]
+
+        # now project 3D->2D using the camera matrix
+        point_img = np.dot(K, point_camera)
+        # normalize
+        point_img[0] /= point_img[2]
+        point_img[1] /= point_img[2]
+
+        return point_img[0:2]
 
 class open3D_visualizer():
     def add_open3d_axis(vis):
@@ -160,35 +192,62 @@ class BasicSensorClients():
 
             # Add vehicle
             vehicle_bp = bp_lib.find('vehicle.tesla.model3') 
-            vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[79])
-
-            # # Move spectator to view ego vehicle
-            # spectator = self.world.get_spectator()
-            # transform = carla.Transform(self.vehicle.get_transform().transform(carla.Location(x=-4,z=2.5)), self.vehicle.get_transform().rotation)
-            # actor = self.world.spawn_actor(vehicle_bp, transform)
-            # spectator.set_transform(transform)
+            vehicle = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
 
             # Add traffic and set in motion with Traffic Manager
-            for i in range(100): 
+            for i in range(50): 
                 vehicle_bp = random.choice(bp_lib.filter('vehicle')) 
                 npc = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))    
-            for v in self.world.get_actors().filter('*vehicle*'): 
-                v.set_autopilot(True)                   
+                if npc:
+                    npc.set_autopilot(True)                   
 
             image_w = self.camera_blueprint().get_attribute("image_size_x").as_int()
             image_h = self.camera_blueprint().get_attribute("image_size_y").as_int()
+            fov = self.camera_blueprint().get_attribute("fov").as_float()
             camera_data = {'image': np.zeros((image_h, image_w, 4))}
 
             self.setup_radar(vehicle)
             self.setup_camera(vehicle) 
+            vehicle.set_autopilot(True)
 
+            # Set up the simulator in synchronous mode
+            settings = self.world.get_settings()
+            settings.synchronous_mode = True # Enables synchronous mode
+            settings.fixed_delta_seconds = 0.05
+            self.world.apply_settings(settings)    
+
+            # Create a queue to store and retrieve the sensor data
+            image_queue = queue.Queue()
+            self.camera.listen(image_queue.put)
+
+            # Get the world to camera matrix
+            world_2_camera = np.array(self.camera.get_transform().get_inverse_matrix())
+
+            # Calculate the camera projection matrix to project from 3D -> 2D
+            K = BoundingBoxGenerator.build_projection_matrix(image_w, image_h, fov)
+
+            # Set up the set of bounding boxes from the level
+            # We filter for traffic lights and traffic signs
+            bounding_box_set = self.world.get_level_bbs(carla.CityObjectLabel.TrafficLight)
+            bounding_box_set.extend(self.world.get_level_bbs(carla.CityObjectLabel.TrafficSigns))
+
+            # Remember the edge pairs
+            edges = [[0,1], [1,3], [3,2], [2,0], [0,4], [4,5], [5,1], [5,7], [7,6], [6,4], [6,2], [7,3]]
+
+            # Retrieve the first image
+            self.world.tick()
+            image = image_queue.get()
+
+            # Reshape the raw data into an RGB array
+            img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
+            
             radar_list = o3d.geometry.PointCloud()              
 
             self.radar.listen(lambda data: BasicSensorClients.radar_callback(data, radar_list))
-            self.camera.listen(lambda image: BasicSensorClients.camera_callback(image, camera_data))        
+            #self.camera.listen(lambda image: BasicSensorClients.camera_callback(image, camera_data))        
 
             cv2.namedWindow('RGB Camera', cv2.WINDOW_AUTOSIZE)
-            cv2.imshow('RGB Camera', camera_data['image'])
+            cv2.imshow('RGB Camera', img)
             cv2.waitKey(1)            
 
             # Open3D visualiser for RADAR
@@ -206,32 +265,71 @@ class BasicSensorClients():
 
             # Update geometry and camera in game loop
             frame = 0
-            while True:                               
-                if frame == 2:
-                    vis.add_geometry(radar_list)
-                vis.update_geometry(radar_list)
+            try:
+                while True:                               
+                    if frame == 2:
+                        vis.add_geometry(radar_list)
+                    vis.update_geometry(radar_list)
 
-                vis.poll_events()
-                vis.update_renderer()
-                # This can fix Open3D jittering issues:
-                time.sleep(0.005)
-                frame += 1
+                    vis.poll_events()
+                    vis.update_renderer()
+                    # This can fix Open3D jittering issues:
+                    time.sleep(0.005)
+                    frame += 1
 
-                cv2.imshow('RGB Camera', camera_data['image'])
+                    # Retrieve and reshape the image
+                    self.world.tick()
+                    image = image_queue.get()
 
-                # Break if user presses 'q'
-                if cv2.waitKey(1) == ord('q'):
-                    break   
+                    img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
 
+                    # Get the camera matrix 
+                    world_2_camera = np.array(self.camera.get_transform().get_inverse_matrix())
+
+                    for npc in self.world.get_actors().filter('*vehicle*'):
+
+                        # Filter out the ego vehicle
+                        if npc.id != vehicle.id:
+                        
+                            bb = npc.bounding_box
+                            dist = npc.get_transform().location.distance(vehicle.get_transform().location)
+
+                            # Filter for the vehicles within 50m
+                            if dist < 50:
+                            
+                            # Calculate the dot product between the forward vector
+                            # of the vehicle and the vector between the vehicle
+                            # and the other vehicle. We threshold this dot product
+                            # to limit to drawing bounding boxes IN FRONT OF THE CAMERA
+                                forward_vec = vehicle.get_transform().get_forward_vector()
+                                ray = npc.get_transform().location - vehicle.get_transform().location
+
+                                if forward_vec.dot(ray) > 1:
+                                    p1 = BoundingBoxGenerator.get_image_point(bb.location, K, world_2_camera)
+                                    verts = [v for v in bb.get_world_vertices(npc.get_transform())]
+                                    for edge in edges:
+                                        p1 = BoundingBoxGenerator.get_image_point(verts[edge[0]], K, world_2_camera)
+                                        p2 = BoundingBoxGenerator.get_image_point(verts[edge[1]],  K, world_2_camera)
+                                        cv2.line(img, (int(p1[0]),int(p1[1])), (int(p2[0]),int(p2[1])), (255,0,0, 255), 1)
+
+                    cv2.imshow('RGB Camera', img)
+                    # Break if user presses 'q'
+                    if cv2.waitKey(1) == ord('q'):
+                        break   
+            except KeyboardInterrupt:
+                self.camera.destroy()
+                pass
+            finally:
+                print('Exit')
             vis.destroy_window()       
             for actor in self.world.get_actors().filter('*vehicle*'):
                 actor.destroy()
             for actor in self.world.get_actors().filter('*sensor*'):
                 actor.destroy()               
-
+        
         finally:
             cv2.destroyAllWindows()  
-            
+        vis.destroy_window()   
 # ==============================================================================
 # -- main() --------------------------------------------------------------------
 # ==============================================================================
