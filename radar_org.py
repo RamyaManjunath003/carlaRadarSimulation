@@ -142,6 +142,7 @@ class BasicSensorClients():
             if(z>0):
                 radar_data[i, :] = [x, y, z, detection.velocity] #Velocity towards or away from the detector
             #radar_data[i, :] = [x, y, z, detection.velocity]
+            #print(detection.velocity, i)
 
         intensity = np.abs(radar_data[:, -1])
         intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
@@ -184,15 +185,27 @@ class BasicSensorClients():
         try:
             #Set up the client using the CARLA client object
             self.client = carla.Client('localhost', 2000)
-            self.client.reload_world()
             self.world = self.client.get_world()
-
             bp_lib = self.world.get_blueprint_library() 
+
+            # Get the map spawn points
             spawn_points = self.world.get_map().get_spawn_points() 
 
             # Add vehicle
             vehicle_bp = bp_lib.find('vehicle.tesla.model3') 
             vehicle = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
+
+            self.setup_camera(vehicle) 
+            self.setup_radar(vehicle)
+
+            # Set up the simulator in synchronous mode
+            settings = self.world.get_settings()
+            settings.synchronous_mode = True # Enables synchronous mode
+            settings.fixed_delta_seconds = 0.05
+            self.world.apply_settings(settings) 
+
+            # Get the map spawn points
+            spawn_points = self.world.get_map().get_spawn_points()
 
             # Add traffic and set in motion with Traffic Manager
             for i in range(50): 
@@ -201,21 +214,6 @@ class BasicSensorClients():
                 if npc:
                     npc.set_autopilot(True)                   
 
-            image_w = self.camera_blueprint().get_attribute("image_size_x").as_int()
-            image_h = self.camera_blueprint().get_attribute("image_size_y").as_int()
-            fov = self.camera_blueprint().get_attribute("fov").as_float()
-            camera_data = {'image': np.zeros((image_h, image_w, 4))}
-
-            self.setup_radar(vehicle)
-            self.setup_camera(vehicle) 
-            vehicle.set_autopilot(True)
-
-            # Set up the simulator in synchronous mode
-            settings = self.world.get_settings()
-            settings.synchronous_mode = True # Enables synchronous mode
-            settings.fixed_delta_seconds = 0.05
-            self.world.apply_settings(settings)    
-
             # Create a queue to store and retrieve the sensor data
             image_queue = queue.Queue()
             self.camera.listen(image_queue.put)
@@ -223,6 +221,11 @@ class BasicSensorClients():
             # Get the world to camera matrix
             world_2_camera = np.array(self.camera.get_transform().get_inverse_matrix())
 
+            # Get the attributes from the camera
+            image_w = self.camera_blueprint().get_attribute("image_size_x").as_int()
+            image_h = self.camera_blueprint().get_attribute("image_size_y").as_int()
+            fov = self.camera_blueprint().get_attribute("fov").as_float()
+            
             # Calculate the camera projection matrix to project from 3D -> 2D
             K = BoundingBoxGenerator.build_projection_matrix(image_w, image_h, fov)
 
@@ -241,11 +244,10 @@ class BasicSensorClients():
             # Reshape the raw data into an RGB array
             img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
             
-            radar_list = o3d.geometry.PointCloud()              
-
+            radar_list = o3d.geometry.PointCloud()
             self.radar.listen(lambda data: BasicSensorClients.radar_callback(data, radar_list))
-            #self.camera.listen(lambda image: BasicSensorClients.camera_callback(image, camera_data))        
-
+            
+            # Display the image in an OpenCV display window
             cv2.namedWindow('RGB Camera', cv2.WINDOW_AUTOSIZE)
             cv2.imshow('RGB Camera', img)
             cv2.waitKey(1)            
