@@ -9,6 +9,8 @@ import time
 import queue
 import open3d as o3d
 import numpy as np
+import logging
+import weakref
 from matplotlib import cm
 
 try:
@@ -129,11 +131,51 @@ class BasicSensorClients():
         return radar_bp
 
     # Radar callback 
-    def radar_callback(data, point_list):
+    def radar_callback(self, data, point_list):
         radar_data = np.zeros((len(data), 4))
+        velocity_range = 4.5 # m/s
+        current_rot = data.transform.rotation
 
         #each radar detection is defined by the depth, altitude and azimuth acc. to the position of the radar
         for i, detection in enumerate(data):
+            azi = math.degrees(detection.azimuth)
+            alt = math.degrees(detection.altitude)
+
+            # The 0.25 adjusts a bit the distance so the dots can
+            # be properly seen
+            fw_vec = carla.Vector3D(x=detection.depth - 0.25)
+            carla.Transform(
+                carla.Location(),
+                carla.Rotation(
+                    pitch=current_rot.pitch + alt,
+                    yaw=current_rot.yaw + azi,
+                    roll=current_rot.roll)).transform(fw_vec)
+
+            def clamp(min_v, max_v, value):
+                return max(min_v, min(value, max_v))
+
+            norm_velocity = detection.velocity / velocity_range # range [-1, 1]
+            r = int(clamp(0.0, 1.0, 1.0 - norm_velocity) * 255.0)
+            g = int(clamp(0.0, 1.0, 1.0 - abs(norm_velocity)) * 255.0)
+            b = int(abs(clamp(- 1.0, 0.0, - 1.0 - norm_velocity)) * 255.0)
+            print("loc " + str(data.transform.location))
+            print("fw_vec " + str(fw_vec))
+            print("norm_velocity " + str(norm_velocity))
+            print("r " + str(r))
+            print("g " + str(g))
+            print("b " + str(b))
+            print("velocity_range " + str(velocity_range))
+
+            self.world.debug.draw_point(
+                data.transform.location + fw_vec,
+                size=0.075,
+                life_time=0.06,
+                persistent_lines=False,
+                color=carla.Color(r, g, b))
+            
+            print(carla.Color(r, g, b))
+            
+
             x = detection.depth * math.cos(detection.altitude) * math.cos(detection.azimuth) #Defined acc. to the position of the radar
             y = detection.depth * math.cos(detection.altitude) * math.sin(detection.azimuth)
             z = detection.depth * math.sin(detection.altitude)
@@ -141,8 +183,8 @@ class BasicSensorClients():
             #also each detection has a velocity towards/away from the detector
             if(z>0):
                 radar_data[i, :] = [x, y, z, detection.velocity] #Velocity towards or away from the detector
-            #radar_data[i, :] = [x, y, z, detection.velocity]
-            #print(detection.velocity, i)
+            radar_data[i, :] = [x, y, z, detection.velocity]
+            print(detection.velocity, i)
 
         intensity = np.abs(radar_data[:, -1])
         intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
@@ -171,7 +213,7 @@ class BasicSensorClients():
         Spawns actor-radar to be used to .
         Sets calibration for client-side boxes rendering.
         """
-        radar_init_trans = carla.Transform(carla.Location(x=-2, z=0.4))
+        radar_init_trans = carla.Transform(carla.Location(x=2, z=0.4))
         self.radar = self.world.spawn_actor(self.radar_blueprint(), radar_init_trans, attach_to=vehicle)
 
     @staticmethod
@@ -197,6 +239,7 @@ class BasicSensorClients():
 
             self.setup_camera(vehicle) 
             self.setup_radar(vehicle)
+            vehicle.set_autopilot(True)
 
             # Set up the simulator in synchronous mode
             settings = self.world.get_settings()
@@ -245,7 +288,8 @@ class BasicSensorClients():
             img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
             
             radar_list = o3d.geometry.PointCloud()
-            self.radar.listen(lambda data: BasicSensorClients.radar_callback(data, radar_list))
+            #weak_self = weakref.ref(self)
+            self.radar.listen(lambda data: self.radar_callback(data, radar_list))
             
             # Display the image in an OpenCV display window
             cv2.namedWindow('RGB Camera', cv2.WINDOW_AUTOSIZE)
