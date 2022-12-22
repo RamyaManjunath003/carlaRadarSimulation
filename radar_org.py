@@ -141,6 +141,12 @@ class BasicSensorClients():
             azi = math.degrees(detection.azimuth)
             alt = math.degrees(detection.altitude)
 
+            # print('azimuth in rad '+ str(detection.azimuth))
+            # print('altitude in rad '+ str(detection.altitude))
+            # print('velocity'+ str(detection.velocity))
+            # print('alt in rad '+ str(azi))
+            # print('alt in rad '+ str(alt))
+
             # The 0.25 adjusts a bit the distance so the dots can
             # be properly seen
             fw_vec = carla.Vector3D(x=detection.depth - 0.25)
@@ -158,13 +164,13 @@ class BasicSensorClients():
             r = int(clamp(0.0, 1.0, 1.0 - norm_velocity) * 255.0)
             g = int(clamp(0.0, 1.0, 1.0 - abs(norm_velocity)) * 255.0)
             b = int(abs(clamp(- 1.0, 0.0, - 1.0 - norm_velocity)) * 255.0)
-            print("loc " + str(data.transform.location))
-            print("fw_vec " + str(fw_vec))
-            print("norm_velocity " + str(norm_velocity))
-            print("r " + str(r))
-            print("g " + str(g))
-            print("b " + str(b))
-            print("velocity_range " + str(velocity_range))
+            # print("loc " + str(data.transform.location))
+            # print("fw_vec " + str(fw_vec))
+            # print("norm_velocity " + str(norm_velocity))
+            # print("r " + str(r))
+            # print("g " + str(g))
+            # print("b " + str(b))
+            # print("velocity_range " + str(velocity_range))
 
             self.world.debug.draw_point(
                 data.transform.location + fw_vec,
@@ -173,7 +179,7 @@ class BasicSensorClients():
                 persistent_lines=False,
                 color=carla.Color(r, g, b))
             
-            print(carla.Color(r, g, b))
+            #print(carla.Color(r, g, b))
             
 
             x = detection.depth * math.cos(detection.altitude) * math.cos(detection.azimuth) #Defined acc. to the position of the radar
@@ -184,7 +190,7 @@ class BasicSensorClients():
             if(z>0):
                 radar_data[i, :] = [x, y, z, detection.velocity] #Velocity towards or away from the detector
             radar_data[i, :] = [x, y, z, detection.velocity]
-            print(detection.velocity, i)
+            #print(detection.velocity, i)
 
         intensity = np.abs(radar_data[:, -1])
         intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
@@ -236,7 +242,8 @@ class BasicSensorClients():
             # Add vehicle
             vehicle_bp = bp_lib.find('vehicle.tesla.model3') 
             vehicle = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
-
+            #self.transform = random.choice(self.world.get_map().get_spawn_points())
+            
             self.setup_camera(vehicle) 
             self.setup_radar(vehicle)
             vehicle.set_autopilot(True)
@@ -249,6 +256,9 @@ class BasicSensorClients():
 
             # Get the map spawn points
             spawn_points = self.world.get_map().get_spawn_points()
+
+            #self.vehicle = self.world.spawn_actor(vehicle_bp, spawn_points)
+           
 
             # Add traffic and set in motion with Traffic Manager
             for i in range(50): 
@@ -339,6 +349,11 @@ class BasicSensorClients():
                         
                             bb = npc.bounding_box
                             dist = npc.get_transform().location.distance(vehicle.get_transform().location)
+                            
+                            # Retrieve ego vehicle velocity
+                            v = vehicle.get_velocity()
+                            kmh = int(3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2))
+                            print('kmh ' + str(kmh))
 
                             # Filter for the vehicles within 50m
                             if dist < 50:
