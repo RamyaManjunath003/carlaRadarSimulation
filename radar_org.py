@@ -89,17 +89,19 @@ class open3D_visualizer():
             [0.0, 0.0, 1.0]]))
         vis.add_geometry(axis)
 
-class BasicSensorClients():
+class BasicSensorClients():   
 
     def __init__(self):
         self.client = None
         self.world = None
         self.camera = None
         self.car = None
+        self.mph = 0
 
         self.display = None
         self.image = None
         self.capture = True
+       # self._egoVel = 0
     
     def set_synchronous_mode(self, synchronous_mode):
         """
@@ -130,23 +132,27 @@ class BasicSensorClients():
         radar_bp.set_attribute('points_per_second', '10000')
         return radar_bp
 
+    def update_vehvelocity(self, velocity):
+        self.vel_x = velocity.x
+        self.vel_y = velocity.y
+        self.vel_z = velocity.z
+        self.mph = int(math.sqrt(self.vel_x**2 + self.vel_y**2 + self.vel_z**2))
+        return self.mph
+    
+    def get_vehvelocity(self):
+        return self.mph
+
     # Radar callback 
     def radar_callback(self, data, point_list):
         radar_data = np.zeros((len(data), 4))
-        velocity_range = 4.5 # m/s
+        velocity_range = 7.5 # m/s
         current_rot = data.transform.rotation
 
         #each radar detection is defined by the depth, altitude and azimuth acc. to the position of the radar
         for i, detection in enumerate(data):
             azi = math.degrees(detection.azimuth)
             alt = math.degrees(detection.altitude)
-
-            # print('azimuth in rad '+ str(detection.azimuth))
-            # print('altitude in rad '+ str(detection.altitude))
-            # print('velocity'+ str(detection.velocity))
-            # print('alt in rad '+ str(azi))
-            # print('alt in rad '+ str(alt))
-
+            
             # The 0.25 adjusts a bit the distance so the dots can
             # be properly seen
             fw_vec = carla.Vector3D(x=detection.depth - 0.25)
@@ -164,23 +170,13 @@ class BasicSensorClients():
             r = int(clamp(0.0, 1.0, 1.0 - norm_velocity) * 255.0)
             g = int(clamp(0.0, 1.0, 1.0 - abs(norm_velocity)) * 255.0)
             b = int(abs(clamp(- 1.0, 0.0, - 1.0 - norm_velocity)) * 255.0)
-            # print("loc " + str(data.transform.location))
-            # print("fw_vec " + str(fw_vec))
-            # print("norm_velocity " + str(norm_velocity))
-            # print("r " + str(r))
-            # print("g " + str(g))
-            # print("b " + str(b))
-            # print("velocity_range " + str(velocity_range))
-
+            
             self.world.debug.draw_point(
                 data.transform.location + fw_vec,
                 size=0.075,
                 life_time=0.06,
                 persistent_lines=False,
                 color=carla.Color(r, g, b))
-            
-            #print(carla.Color(r, g, b))
-            
 
             x = detection.depth * math.cos(detection.altitude) * math.cos(detection.azimuth) #Defined acc. to the position of the radar
             y = detection.depth * math.cos(detection.altitude) * math.sin(detection.azimuth)
@@ -189,8 +185,18 @@ class BasicSensorClients():
             #also each detection has a velocity towards/away from the detector
             if(z>0):
                 radar_data[i, :] = [x, y, z, detection.velocity] #Velocity towards or away from the detector
-            radar_data[i, :] = [x, y, z, detection.velocity]
-            #print(detection.velocity, i)
+            #radar_data[i, :] = [x, y, z, detection.velocity]
+
+            ego_vel = self.get_vehvelocity()
+
+            # detection.velocity = negative, => Vehicle is APPROACHING
+            # detection.velocity = positive, => Vehicle is LEAVING
+            # detection.velocity = zero, => object is STATIONARY 
+            delta = (ego_vel * math.cos(detection.azimuth)) - (abs(detection.velocity)) 
+
+            #TBD: Any objects other than vehicles and walkers can be considered as stationary 
+
+            print('delta ' + str(delta))
 
         intensity = np.abs(radar_data[:, -1])
         intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
@@ -203,6 +209,19 @@ class BasicSensorClients():
         points[:, :1] = -points[:, :1]
         point_list.points = o3d.utility.Vector3dVector(points)
         point_list.colors = o3d.utility.Vector3dVector(int_color)
+
+        raw_data_points = np.frombuffer(data.raw_data, dtype=np.dtype('f4'))
+        raw_data_points = np.reshape(raw_data_points, (len(data), 4))
+        #print('raw_data_points' + str(raw_data_points))
+        
+        # code convert array into list and measure distance
+        L = []
+        pointslist = raw_data_points.tolist()
+        for i in range(len(pointslist)):
+            L.append(pointslist[i-1][-1])
+        
+        ave = sum(L)/len(L)
+        #print('Ave ' + str(ave)) #average distance of detected objects
 
     #Camera callback          
     def setup_camera(self, vehicle):
@@ -221,7 +240,7 @@ class BasicSensorClients():
         """
         radar_init_trans = carla.Transform(carla.Location(x=2, z=0.4))
         self.radar = self.world.spawn_actor(self.radar_blueprint(), radar_init_trans, attach_to=vehicle)
-
+ 
     @staticmethod
     def camera_callback(image, data_dict):
         data_dict['image'] = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
@@ -246,8 +265,8 @@ class BasicSensorClients():
             
             self.setup_camera(vehicle) 
             self.setup_radar(vehicle)
-            vehicle.set_autopilot(True)
-
+            vehicle.set_autopilot(False)
+ 
             # Set up the simulator in synchronous mode
             settings = self.world.get_settings()
             settings.synchronous_mode = True # Enables synchronous mode
@@ -257,15 +276,18 @@ class BasicSensorClients():
             # Get the map spawn points
             spawn_points = self.world.get_map().get_spawn_points()
 
-            #self.vehicle = self.world.spawn_actor(vehicle_bp, spawn_points)
-           
-
             # Add traffic and set in motion with Traffic Manager
             for i in range(50): 
                 vehicle_bp = random.choice(bp_lib.filter('vehicle')) 
                 npc = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))    
                 if npc:
-                    npc.set_autopilot(True)                   
+                    npc.set_autopilot(True) 
+
+            for actor in self.world.get_actors():
+                if actor.attributes.get('role_name') == 'hero':
+                    player = actor
+                    print('Player ' + str(player))
+                    break                  
 
             # Create a queue to store and retrieve the sensor data
             image_queue = queue.Queue()
@@ -298,7 +320,6 @@ class BasicSensorClients():
             img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
             
             radar_list = o3d.geometry.PointCloud()
-            #weak_self = weakref.ref(self)
             self.radar.listen(lambda data: self.radar_callback(data, radar_list))
             
             # Display the image in an OpenCV display window
@@ -314,7 +335,7 @@ class BasicSensorClients():
                 height=1080,
                 left=960,
                 top=540)
-            vis.get_render_option().background_color = [0.05, 0.05, 0.05]
+            vis.get_render_option().background_color = [10, 10, 10]
             vis.get_render_option().point_size = 2
             vis.get_render_option().show_coordinate_frame = True  
             open3D_visualizer.add_open3d_axis(vis)          
@@ -342,18 +363,31 @@ class BasicSensorClients():
                     # Get the camera matrix 
                     world_2_camera = np.array(self.camera.get_transform().get_inverse_matrix())
 
+                    # for actor in self.world.get_actors():
+                    #     if actor.attributes.get('role_name') == 'hero':
+                    #         player = actor
+                    #         print('Player ' + str(actor.attributes.get('role_name')))
+                    #         break  
+                    #     print('Player ' + str(actor.attributes.get('role_name')))
+                    # veh__blueprints = [bp for bp in self.world.get_blueprint_library().filter('*vehicle*')]
+                    # for v_blueprint in veh__blueprints:
+                    #    print(v_blueprint.id)
+                    #    for attr in blueprint:
+                    #        print('  - {}'.format(attr))
+
+                    #TBD: Use carla.VehicleWheelLocation to obtain wheel locations 
+
                     for npc in self.world.get_actors().filter('*vehicle*'):
 
                         # Filter out the ego vehicle
-                        if npc.id != vehicle.id:
-                        
+                        if npc.id != vehicle.id:                        
+                            
                             bb = npc.bounding_box
                             dist = npc.get_transform().location.distance(vehicle.get_transform().location)
-                            
+
                             # Retrieve ego vehicle velocity
                             v = vehicle.get_velocity()
-                            kmh = int(3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2))
-                            print('kmh ' + str(kmh))
+                            self.update_vehvelocity(v)                            
 
                             # Filter for the vehicles within 50m
                             if dist < 50:
@@ -365,9 +399,12 @@ class BasicSensorClients():
                                 forward_vec = vehicle.get_transform().get_forward_vector()
                                 ray = npc.get_transform().location - vehicle.get_transform().location
 
+                                # returns the vehicle id and name within 50m range
+                                print('npc_typ_id ' + str(npc.type_id), 'npc_id ' + str(npc.id)) 
+
                                 if forward_vec.dot(ray) > 1:
                                     p1 = BoundingBoxGenerator.get_image_point(bb.location, K, world_2_camera)
-                                    verts = [v for v in bb.get_world_vertices(npc.get_transform())]
+                                    verts = [v for v in bb.get_world_vertices(npc.get_transform())] #add bb on the open3d
                                     for edge in edges:
                                         p1 = BoundingBoxGenerator.get_image_point(verts[edge[0]], K, world_2_camera)
                                         p2 = BoundingBoxGenerator.get_image_point(verts[edge[1]],  K, world_2_camera)
