@@ -9,8 +9,6 @@ import time
 import queue
 import open3d as o3d
 import numpy as np
-import logging
-import weakref
 from matplotlib import cm
 
 try:
@@ -57,9 +55,9 @@ class BoundingBoxGenerator():
         # transform to camera coordinates
         point_camera = np.dot(w2c, point)
 
-        # New we must change from UE4's coordinate system to an "standard"
+        # Now we must change from UE4's coordinate system to an "standard"
         # (x, y ,z) -> (y, -z, x)
-        # and we remove the fourth componebonent also
+        # and we remove the fourth component also
         point_camera = [point_camera[1], -point_camera[2], point_camera[0]]
 
         # now project 3D->2D using the camera matrix
@@ -101,7 +99,7 @@ class BasicSensorClients():
         self.display = None
         self.image = None
         self.capture = True
-       # self._egoVel = 0
+        self.tgt_vel = 0
     
     def set_synchronous_mode(self, synchronous_mode):
         """
@@ -129,7 +127,8 @@ class BasicSensorClients():
         #radar_bp.set_attribute('noise_seed','10')
         radar_bp.set_attribute('horizontal_fov', '35.0')
         radar_bp.set_attribute('vertical_fov', '20.0')
-        radar_bp.set_attribute('points_per_second', '10000')
+        radar_bp.set_attribute('range', str(60))
+        radar_bp.set_attribute('points_per_second', '20000')
         return radar_bp
 
     def update_vehvelocity(self, velocity):
@@ -137,10 +136,33 @@ class BasicSensorClients():
         self.vel_y = velocity.y
         self.vel_z = velocity.z
         self.mph = int(math.sqrt(self.vel_x**2 + self.vel_y**2 + self.vel_z**2))
-        return self.mph
+
+    def set_vehstatus(self, status):
+        self.status = status
+    
+    def get_vehstatus(self):
+        return self.status
     
     def get_vehvelocity(self):
         return self.mph
+
+    def update_vehtype(self, veh_type):
+       self.vehtype = veh_type
+
+    def set_trgt_veh_vel(self, vel):
+        self.tgt_vel = vel
+    
+    def get_trgt_veh_vel(self):
+        return self.tgt_vel
+
+    # def update_walker(self, walker):
+    #     self._walker = walker
+
+    # def get_walker(self):
+    #     return self._walker
+
+    # def get_vehtype(self):
+    #     return self.vehtype
 
     # Radar callback 
     def radar_callback(self, data, point_list):
@@ -148,7 +170,8 @@ class BasicSensorClients():
         velocity_range = 7.5 # m/s
         current_rot = data.transform.rotation
 
-        #each radar detection is defined by the depth, altitude and azimuth acc. to the position of the radar
+        #each radar detection is defined by the depth, altitude and azimuth acc. to the position of the radar        
+
         for i, detection in enumerate(data):
             azi = math.degrees(detection.azimuth)
             alt = math.degrees(detection.altitude)
@@ -167,60 +190,61 @@ class BasicSensorClients():
                 return max(min_v, min(value, max_v))
 
             norm_velocity = detection.velocity / velocity_range # range [-1, 1]
-            r = int(clamp(0.0, 1.0, 1.0 - norm_velocity) * 255.0)
-            g = int(clamp(0.0, 1.0, 1.0 - abs(norm_velocity)) * 255.0)
-            b = int(abs(clamp(- 1.0, 0.0, - 1.0 - norm_velocity)) * 255.0)
+            if(norm_velocity > 0):
+                r = int(clamp(0.0, 1.0, 1.0 - norm_velocity) * 255.0)
+                g = int(clamp(0.0, 1.0, 1.0 - abs(norm_velocity)) * 255.0)
+                b = int(abs(clamp(- 1.0, 0.0, - 1.0 - norm_velocity)) * 255.0)
             
-            self.world.debug.draw_point(
-                data.transform.location + fw_vec,
-                size=0.075,
-                life_time=0.06,
-                persistent_lines=False,
-                color=carla.Color(r, g, b))
+                self.world.debug.draw_point(
+                    data.transform.location + fw_vec,
+                    size=0.075,
+                    life_time=0.06,
+                    persistent_lines=True,
+                    color=carla.Color(r, g, b))
 
             x = detection.depth * math.cos(detection.altitude) * math.cos(detection.azimuth) #Defined acc. to the position of the radar
             y = detection.depth * math.cos(detection.altitude) * math.sin(detection.azimuth)
-            z = detection.depth * math.sin(detection.altitude)
+            z = detection.depth * math.sin(detection.altitude) # calculates the height wrt the distance of the object from the sensor and the altitude of the target
 
-            #also each detection has a velocity towards/away from the detector
-            if(z>0):
-                radar_data[i, :] = [x, y, z, detection.velocity] #Velocity towards or away from the detector
-            #radar_data[i, :] = [x, y, z, detection.velocity]
+            """
+            detection.velocity = negative, => Vehicle is APPROACHING
+            detection.velocity = positive, => Vehicle is LEAVING
+            detection.velocity = zero, => object is STATIONARY 
+            """
+            ego_vel = self.get_vehvelocity() 
+            target_vel = self.get_trgt_veh_vel() 
 
-            ego_vel = self.get_vehvelocity()
+            Vr = ego_vel - target_vel
+  
+            delta = (ego_vel * math.cos(detection.azimuth)) - (abs(detection.velocity))           
 
-            # detection.velocity = negative, => Vehicle is APPROACHING
-            # detection.velocity = positive, => Vehicle is LEAVING
-            # detection.velocity = zero, => object is STATIONARY 
-            delta = (ego_vel * math.cos(detection.azimuth)) - (abs(detection.velocity)) 
-
+            # filtering dynamic and ground clutter
+            if(z>=0 and z<=3 and (abs(delta) > 0) or ((z>0 and z<2) and (ego_vel==0) and (abs(delta)==0))):
+                radar_data[i, :] = [x, y, z, delta] #Velocity towards or away from the detector
+              
             #TBD: Any objects other than vehicles and walkers can be considered as stationary 
-
-            print('delta ' + str(delta))
-
-        intensity = np.abs(radar_data[:, -1])
-        intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
+    
+        intensity = np.abs(radar_data[:, -1])    
+        # intensity is a measure of detection.velocity 
+        intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100)) #np.log(np.exp(-0.004 * 100)= -0.4
+        
         int_color = np.c_[
             np.interp(intensity_col, COOL_RANGE, COOL[:, 0]),
             np.interp(intensity_col, COOL_RANGE, COOL[:, 1]),
             np.interp(intensity_col, COOL_RANGE, COOL[:, 2])]
-
+       
         points = radar_data[:, :-1]
         points[:, :1] = -points[:, :1]
         point_list.points = o3d.utility.Vector3dVector(points)
         point_list.colors = o3d.utility.Vector3dVector(int_color)
-
-        raw_data_points = np.frombuffer(data.raw_data, dtype=np.dtype('f4'))
-        raw_data_points = np.reshape(raw_data_points, (len(data), 4))
-        #print('raw_data_points' + str(raw_data_points))
+       
+        # # code convert array into list and measure distance
+        # L = []
+        # pointslist = raw_data_points.tolist()
+        # for i in range(len(pointslist)):
+        #     L.append(pointslist[i-1][-1])
         
-        # code convert array into list and measure distance
-        L = []
-        pointslist = raw_data_points.tolist()
-        for i in range(len(pointslist)):
-            L.append(pointslist[i-1][-1])
-        
-        ave = sum(L)/len(L)
+        # ave = sum(L)/len(L)
         #print('Ave ' + str(ave)) #average distance of detected objects
 
     #Camera callback          
@@ -240,7 +264,7 @@ class BasicSensorClients():
         """
         radar_init_trans = carla.Transform(carla.Location(x=2, z=0.4))
         self.radar = self.world.spawn_actor(self.radar_blueprint(), radar_init_trans, attach_to=vehicle)
- 
+
     @staticmethod
     def camera_callback(image, data_dict):
         data_dict['image'] = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
@@ -265,7 +289,7 @@ class BasicSensorClients():
             
             self.setup_camera(vehicle) 
             self.setup_radar(vehicle)
-            vehicle.set_autopilot(False)
+            vehicle.set_autopilot(True)
  
             # Set up the simulator in synchronous mode
             settings = self.world.get_settings()
@@ -281,13 +305,7 @@ class BasicSensorClients():
                 vehicle_bp = random.choice(bp_lib.filter('vehicle')) 
                 npc = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))    
                 if npc:
-                    npc.set_autopilot(True) 
-
-            for actor in self.world.get_actors():
-                if actor.attributes.get('role_name') == 'hero':
-                    player = actor
-                    print('Player ' + str(player))
-                    break                  
+                    npc.set_autopilot(True)              
 
             # Create a queue to store and retrieve the sensor data
             image_queue = queue.Queue()
@@ -329,16 +347,24 @@ class BasicSensorClients():
 
             # Open3D visualiser for RADAR
             vis = o3d.visualization.Visualizer()
+
+            # TBD: radar_list points to BOUNIDNG BOX conversion using open3D
+            
             vis.create_window(
                 window_name='Carla Radar',
                 width=1920,
                 height=1080,
                 left=960,
                 top=540)
-            vis.get_render_option().background_color = [10, 10, 10]
-            vis.get_render_option().point_size = 2
+            vis.get_render_option().background_color = [0.51, 0.51, 0.51] #np.array([10, 10, 10], np.float32)
+            vis.get_render_option().point_size = 4
             vis.get_render_option().show_coordinate_frame = True  
-            open3D_visualizer.add_open3d_axis(vis)          
+            open3D_visualizer.add_open3d_axis(vis)  
+
+            # Create a 3D box mesh
+            box_mesh = o3d.geometry.TriangleMesh.create_box(width=1.0, height=2.0, depth=3.0)   
+            bb = box_mesh.get_oriented_bounding_box()  
+            print(bb)   
 
             # Update geometry and camera in game loop
             frame = 0
@@ -363,34 +389,39 @@ class BasicSensorClients():
                     # Get the camera matrix 
                     world_2_camera = np.array(self.camera.get_transform().get_inverse_matrix())
 
-                    # for actor in self.world.get_actors():
-                    #     if actor.attributes.get('role_name') == 'hero':
-                    #         player = actor
-                    #         print('Player ' + str(actor.attributes.get('role_name')))
-                    #         break  
-                    #     print('Player ' + str(actor.attributes.get('role_name')))
-                    # veh__blueprints = [bp for bp in self.world.get_blueprint_library().filter('*vehicle*')]
-                    # for v_blueprint in veh__blueprints:
-                    #    print(v_blueprint.id)
-                    #    for attr in blueprint:
-                    #        print('  - {}'.format(attr))
-
                     #TBD: Use carla.VehicleWheelLocation to obtain wheel locations 
+                    self.set_vehstatus(False) 
+
+                    v = vehicle.get_velocity()
+                    self.update_vehvelocity(v)
 
                     for npc in self.world.get_actors().filter('*vehicle*'):
 
                         # Filter out the ego vehicle
-                        if npc.id != vehicle.id:                        
-                            
+                        if npc.id != vehicle.id:  
+                                        
                             bb = npc.bounding_box
                             dist = npc.get_transform().location.distance(vehicle.get_transform().location)
+                           # print('dist = ' + str(dist))
 
                             # Retrieve ego vehicle velocity
-                            v = vehicle.get_velocity()
-                            self.update_vehvelocity(v)                            
+                            # v = vehicle.get_velocity()
+                            # self.update_vehvelocity(v)  
+                            npc_vel = npc.get_velocity()                                
+                            tgt_vel = int(math.sqrt(npc_vel.x**2 + npc_vel.y**2 + npc_vel.z**2)) 
+                            self.set_trgt_veh_vel(tgt_vel)                                                    
 
-                            # Filter for the vehicles within 50m
+                            # Filter for the vehicles within 50m same as radar horizontal fov
                             if dist < 50:
+
+                                # for npc_walker in self.world.get_actors().filter('*walker*'):                                    
+                                #     if npc_walker:
+                                #         self.update_walker(npc_walker.type_id)                               
+
+                                veh_vel = vehicle.get_velocity() 
+                                ego_vel = int(math.sqrt(veh_vel.x**2 + veh_vel.y**2 + veh_vel.z**2))
+
+                                rel_vel = ego_vel - tgt_vel
                             
                             # Calculate the dot product between the forward vector
                             # of the vehicle and the vector between the vehicle
@@ -399,8 +430,10 @@ class BasicSensorClients():
                                 forward_vec = vehicle.get_transform().get_forward_vector()
                                 ray = npc.get_transform().location - vehicle.get_transform().location
 
-                                # returns the vehicle id and name within 50m range
-                                print('npc_typ_id ' + str(npc.type_id), 'npc_id ' + str(npc.id)) 
+                                # store the vehicle ids within 35m range
+                                self.update_vehtype(npc.type_id) 
+                                self.set_vehstatus(True) 
+                                # Read the attribute - No. of wheels
 
                                 if forward_vec.dot(ray) > 1:
                                     p1 = BoundingBoxGenerator.get_image_point(bb.location, K, world_2_camera)
@@ -423,7 +456,9 @@ class BasicSensorClients():
             for actor in self.world.get_actors().filter('*vehicle*'):
                 actor.destroy()
             for actor in self.world.get_actors().filter('*sensor*'):
-                actor.destroy()               
+                actor.destroy()
+            for actor in self.world.get_actors().filter('*walker*'):
+                actor.destroy()             
         
         finally:
             cv2.destroyAllWindows()  
