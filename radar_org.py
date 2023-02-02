@@ -7,9 +7,13 @@ import cv2
 import math
 import time
 import queue
+import csv
 import open3d as o3d
 import numpy as np
 from matplotlib import cm
+import matplotlib.pyplot as plt
+from  matplotlib import animation
+import pandas as pd
 
 try:
     sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
@@ -27,14 +31,17 @@ except ImportError:
 VIEW_WIDTH = 1920//2
 VIEW_HEIGHT = 1080//2
 VIEW_FOV = 90
+inc=0
+inc1=0
 
 BB_COLOR = (248, 64, 24)
 
 # Auxilliary code for colormaps and axes
-VIRIDIS = np.array(cm.get_cmap('viridis').colors)
+VIRIDIS = np.array(cm.get_cmap('plasma').colors)
 VID_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
 
 COOL_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
+print(VIRIDIS.shape[0])
 COOL = np.array(cm.get_cmap('winter')(COOL_RANGE))
 COOL = COOL[:,:3]
 
@@ -127,9 +134,32 @@ class BasicSensorClients():
         #radar_bp.set_attribute('noise_seed','10')
         radar_bp.set_attribute('horizontal_fov', '35.0')
         radar_bp.set_attribute('vertical_fov', '20.0')
+        #radar_bp.set_attribute('sensor_tick', '0.5')
         radar_bp.set_attribute('range', str(60))
         radar_bp.set_attribute('points_per_second', '20000')
         return radar_bp
+
+    #Camera callback          
+    def setup_camera(self, vehicle):
+        """
+        Spawns actor-camera to be used to render view.
+        Sets calibration for client-side boxes rendering.
+        """
+        camera_bp = self.camera_blueprint()
+        camera_transform = carla.Transform(carla.Location(x=-7.5, z=2.8), carla.Rotation(yaw=0, pitch=0, roll=0))
+        self.camera = self.world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
+
+    def setup_radar(self, vehicle):
+        """
+        Spawns actor-radar to be used to .
+        Sets calibration for client-side boxes rendering.
+        """
+        radar_init_trans = carla.Transform(carla.Location(x=2, z=0.4))
+        self.radar = self.world.spawn_actor(self.radar_blueprint(), radar_init_trans, attach_to=vehicle)
+
+    @staticmethod
+    def camera_callback(image, data_dict):
+        data_dict['image'] = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
 
     def update_vehvelocity(self, velocity):
         self.vel_x = velocity.x
@@ -155,15 +185,6 @@ class BasicSensorClients():
     def get_trgt_veh_vel(self):
         return self.tgt_vel
 
-    # def update_walker(self, walker):
-    #     self._walker = walker
-
-    # def get_walker(self):
-    #     return self._walker
-
-    # def get_vehtype(self):
-    #     return self.vehtype
-
     # Radar callback 
     def radar_callback(self, data, point_list):
         radar_data = np.zeros((len(data), 4))
@@ -171,8 +192,23 @@ class BasicSensorClients():
         current_rot = data.transform.rotation
 
         #each radar detection is defined by the depth, altitude and azimuth acc. to the position of the radar        
+        filename = '2d_spectrum.csv'
+        header = ['det_count', 'depth']
+        
+        # with open(filename, 'a', newline="") as file:
+        #     csvwriter = csv.writer(file)
+        #     csvwriter.writerow(header)
 
-        for i, detection in enumerate(data):
+        # data_det = [[data.get_detection_count()]]
+
+        # with open(filename, 'a', newline="") as file:
+        #     csvwriter = csv.writer(file) 
+        #     csvwriter.writerows(data_det)            
+
+        for i, detection in enumerate(data):            
+            # inc1+=1
+            #print('inc1 ' + str(inc1))
+            #print(detection)
             azi = math.degrees(detection.azimuth)
             alt = math.degrees(detection.altitude)
             
@@ -206,21 +242,53 @@ class BasicSensorClients():
             y = detection.depth * math.cos(detection.altitude) * math.sin(detection.azimuth)
             z = detection.depth * math.sin(detection.altitude) # calculates the height wrt the distance of the object from the sensor and the altitude of the target
 
+            # vehicles = self.world.get_actors().filter('vehicle.*')
+            # print('Number of vehicles: % 8d' % len(vehicles))
+            # 
+            # data_det = [[detection.depth, data.get_detection_count(), data]]
+            # with open(filename, 'a', newline="") as file:
+            #     csvwriter = csv.writer(file) # 2. create a csvwriter object
+            #     csvwriter.writerows(data_det) # 5. write the rest of the data                
+
+            # print('depth  ' + str(detection.depth), 'Vr ' + str(detection.velocity))
+            # print('azi ' + str(detection.azimuth), 'alt ' + str(detection.altitude))
+
+            # To get a numpy [[vel, azimuth, altitude, depth],...[,,,]]:
+            points = np.frombuffer(data.raw_data, dtype=np.dtype('f4'))
+            points = np.reshape(points, (len(data), 4))
+            #print(points)
+            
             """
             detection.velocity = negative, => Vehicle is APPROACHING
             detection.velocity = positive, => Vehicle is LEAVING
             detection.velocity = zero, => object is STATIONARY 
             """
             ego_vel = self.get_vehvelocity() 
-            target_vel = self.get_trgt_veh_vel() 
+            # target_vel = self.get_trgt_veh_vel() 
 
-            Vr = ego_vel - target_vel
+            #Vr = ego_vel - target_vel
   
-            delta = (ego_vel * math.cos(detection.azimuth)) - (abs(detection.velocity))           
+            delta = (ego_vel * math.cos(detection.azimuth)) - (abs(detection.velocity)) 
+            # print(ego_vel, math.cos(detection.azimuth))
+            # print('delta ' + str(int(delta)))
+            # print('det_vel ' + str(detection.velocity))         
 
             # filtering dynamic and ground clutter
-            if(z>=0 and z<=3 and (abs(delta) > 0) or ((z>0 and z<2) and (ego_vel==0) and (abs(delta)==0))):
-                radar_data[i, :] = [x, y, z, delta] #Velocity towards or away from the detector
+            if(z>=0 and z<=3 and (abs(delta)) or ((z>0 and z<2) and (ego_vel==0) and (abs(int(delta))==0))):
+                radar_data[i, :] = [x, y, z, (int(delta))] #Velocity towards or away from the detector
+                #print('Ramya')
+            #print(data.get_detection_count())
+
+            
+
+            #radar_data[i, :] = [x, y, z, abs(delta)<0.1]
+                
+                # mesh_box = o3d.geometry.TriangleMesh.create_box(width = x, height=y,depth=z)
+                # mesh_box.compute_vertex_normals()
+                # mesh_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+                #     size=0.6, origin=[-2, -2, -2])
+                # o3d.visualization.draw_geometries(mesh_box, mesh_frame)
+                #o3d.visualization.draw_geometries([mesh_box, mesh_frame])
               
             #TBD: Any objects other than vehicles and walkers can be considered as stationary 
     
@@ -237,6 +305,27 @@ class BasicSensorClients():
         points[:, :1] = -points[:, :1]
         point_list.points = o3d.utility.Vector3dVector(points)
         point_list.colors = o3d.utility.Vector3dVector(int_color)
+        print(radar_data)
+        # if(abs(delta) > 0):            
+        #     point_list.colors = o3d.utility.Vector3dVector([0, 0, 0])
+        # elif(abs(delta) < 0):
+        #     point_list.colors = o3d.utility.Vector3dVector([0, 1, 0])
+        # else:
+        #     point_list.colors = o3d.utility.Vector3dVector([0, 0, 1])
+        
+        # print('int color ' + str(int_color))
+
+        data_gen = [data.get_detection_count(), int(detection.depth), int(abs(detection.velocity)), int(abs(delta))]
+
+        with open(filename, 'a', newline="") as file:
+            csvwriter = csv.writer(file) 
+            csvwriter.writerow(data_gen)
+        
+        #print('detection.depth ' + str(detection.depth))
+
+        # print(abs(detection.velocity))
+
+        # print(data.get_detection_count())
        
         # # code convert array into list and measure distance
         # L = []
@@ -246,28 +335,6 @@ class BasicSensorClients():
         
         # ave = sum(L)/len(L)
         #print('Ave ' + str(ave)) #average distance of detected objects
-
-    #Camera callback          
-    def setup_camera(self, vehicle):
-        """
-        Spawns actor-camera to be used to render view.
-        Sets calibration for client-side boxes rendering.
-        """
-        camera_bp = self.camera_blueprint()
-        camera_transform = carla.Transform(carla.Location(x=-7.5, z=2.8), carla.Rotation(yaw=0, pitch=0, roll=0))
-        self.camera = self.world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
-
-    def setup_radar(self, vehicle):
-        """
-        Spawns actor-radar to be used to .
-        Sets calibration for client-side boxes rendering.
-        """
-        radar_init_trans = carla.Transform(carla.Location(x=2, z=0.4))
-        self.radar = self.world.spawn_actor(self.radar_blueprint(), radar_init_trans, attach_to=vehicle)
-
-    @staticmethod
-    def camera_callback(image, data_dict):
-        data_dict['image'] = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
 
     def game_loop(self):
         """
@@ -285,6 +352,7 @@ class BasicSensorClients():
             # Add vehicle
             vehicle_bp = bp_lib.find('vehicle.tesla.model3') 
             vehicle = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
+            vehicle_bp.set_attribute('color', '255,0,0') # ego vehicle's color set to Red
             #self.transform = random.choice(self.world.get_map().get_spawn_points())
             
             self.setup_camera(vehicle) 
@@ -301,11 +369,16 @@ class BasicSensorClients():
             spawn_points = self.world.get_map().get_spawn_points()
 
             # Add traffic and set in motion with Traffic Manager
+            #self.spawn_vehicles_around_ego_vehicles(ego_vehicle=vehicle, radius=100, spawn_points=spawn_points, numbers_of_vehicles=10)
+
             for i in range(50): 
                 vehicle_bp = random.choice(bp_lib.filter('vehicle')) 
                 npc = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))    
                 if npc:
-                    npc.set_autopilot(True)              
+                    npc.set_autopilot(True)  
+
+            #vehicles = self.world.get_actors().filter('vehicle.*')
+                                        
 
             # Create a queue to store and retrieve the sensor data
             image_queue = queue.Queue()
@@ -403,6 +476,7 @@ class BasicSensorClients():
                             bb = npc.bounding_box
                             dist = npc.get_transform().location.distance(vehicle.get_transform().location)
                            # print('dist = ' + str(dist))
+                            # print('Number of vehicles: % 8d' %  (self.world.get_actors().filter('vehicle.*')))
 
                             # Retrieve ego vehicle velocity
                             # v = vehicle.get_velocity()
@@ -413,11 +487,7 @@ class BasicSensorClients():
 
                             # Filter for the vehicles within 50m same as radar horizontal fov
                             if dist < 50:
-
-                                # for npc_walker in self.world.get_actors().filter('*walker*'):                                    
-                                #     if npc_walker:
-                                #         self.update_walker(npc_walker.type_id)                               
-
+              
                                 veh_vel = vehicle.get_velocity() 
                                 ego_vel = int(math.sqrt(veh_vel.x**2 + veh_vel.y**2 + veh_vel.z**2))
 
