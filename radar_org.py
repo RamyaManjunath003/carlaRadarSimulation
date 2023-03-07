@@ -135,7 +135,7 @@ class BasicSensorClients():
         radar_bp.set_attribute('horizontal_fov', '35.0')
         radar_bp.set_attribute('vertical_fov', '20.0')
         #radar_bp.set_attribute('sensor_tick', '0.5')
-        radar_bp.set_attribute('range', str(60))
+        radar_bp.set_attribute('range', '60') #100m is the maximum 
         radar_bp.set_attribute('points_per_second', '20000')
         return radar_bp
 
@@ -165,7 +165,7 @@ class BasicSensorClients():
         self.vel_x = velocity.x
         self.vel_y = velocity.y
         self.vel_z = velocity.z
-        self.mph = int(math.sqrt(self.vel_x**2 + self.vel_y**2 + self.vel_z**2))
+        self.mps = (math.sqrt(self.vel_x**2 + self.vel_y**2 + self.vel_z**2))
 
     def set_vehstatus(self, status):
         self.status = status
@@ -174,7 +174,7 @@ class BasicSensorClients():
         return self.status
     
     def get_vehvelocity(self):
-        return self.mph
+        return self.mps
 
     def update_vehtype(self, veh_type):
        self.vehtype = veh_type
@@ -190,20 +190,21 @@ class BasicSensorClients():
         radar_data = np.zeros((len(data), 4))
         velocity_range = 7.5 # m/s
         current_rot = data.transform.rotation
+        #count=0
 
         #each radar detection is defined by the depth, altitude and azimuth acc. to the position of the radar        
-        filename = '2d_spectrum.csv'
-        header = ['det_count', 'depth']
+        filename = 'microdoppler_pedestrian.csv'
+        #header = ['det_count', 'depth']
         
         # with open(filename, 'a', newline="") as file:
         #     csvwriter = csv.writer(file)
-        #     csvwriter.writerow(header)
 
         # data_det = [[data.get_detection_count()]]
 
         # with open(filename, 'a', newline="") as file:
         #     csvwriter = csv.writer(file) 
         #     csvwriter.writerows(data_det)            
+        # print('count before: ' + str(count))
 
         for i, detection in enumerate(data):            
             # inc1+=1
@@ -242,17 +243,6 @@ class BasicSensorClients():
             y = detection.depth * math.cos(detection.altitude) * math.sin(detection.azimuth)
             z = detection.depth * math.sin(detection.altitude) # calculates the height wrt the distance of the object from the sensor and the altitude of the target
 
-            # vehicles = self.world.get_actors().filter('vehicle.*')
-            # print('Number of vehicles: % 8d' % len(vehicles))
-            # 
-            # data_det = [[detection.depth, data.get_detection_count(), data]]
-            # with open(filename, 'a', newline="") as file:
-            #     csvwriter = csv.writer(file) # 2. create a csvwriter object
-            #     csvwriter.writerows(data_det) # 5. write the rest of the data                
-
-            # print('depth  ' + str(detection.depth), 'Vr ' + str(detection.velocity))
-            # print('azi ' + str(detection.azimuth), 'alt ' + str(detection.altitude))
-
             # To get a numpy [[vel, azimuth, altitude, depth],...[,,,]]:
             points = np.frombuffer(data.raw_data, dtype=np.dtype('f4'))
             points = np.reshape(points, (len(data), 4))
@@ -264,34 +254,35 @@ class BasicSensorClients():
             detection.velocity = zero, => object is STATIONARY 
             """
             ego_vel = self.get_vehvelocity() 
-            # target_vel = self.get_trgt_veh_vel() 
+            target_vel = self.get_trgt_veh_vel() 
 
-            #Vr = ego_vel - target_vel
+            #Vr = target_vel - ego_vel # Vr is same as detection.velocity
+            print('det_vel ' + str(detection.velocity))
+            print('ego_vel ' + str(ego_vel))
+            print('azi ' + str(detection.azimuth))
+            print('alt ' + str(detection.altitude))
+            print('depth ' + str(detection.depth))
   
-            delta = (ego_vel * math.cos(detection.azimuth)) - (abs(detection.velocity)) 
-            # print(ego_vel, math.cos(detection.azimuth))
-            # print('delta ' + str(int(delta)))
-            # print('det_vel ' + str(detection.velocity))         
+            delta = (ego_vel * math.cos(detection.azimuth)) - (abs(detection.velocity)) # works only when the ego vehicle is stationary
+            print('delta ' + str(delta))
 
+            print('z ' + str(z))
             # filtering dynamic and ground clutter
-            if(z>=0 and z<=3 and (abs(delta)) or ((z>0 and z<2) and (ego_vel==0) and (abs(int(delta))==0))):
-                radar_data[i, :] = [x, y, z, (int(delta))] #Velocity towards or away from the detector
-                #print('Ramya')
-            #print(data.get_detection_count())
-
+            #if(z>=0 and z<=3 and (abs(delta)!=0) or ((z>0 and z<2) and (ego_vel>=0 and ego_vel<=4) and (abs(delta)<=0.1))):
+            #if(z>=0 and z<=3 and (abs(delta)) or ((z>0 and z<2) and (ego_vel==0) and (abs(int(delta))==0))):
+            #if(z>=0 and z<=3):
+                #count+=1
+            radar_data[i, :] = [x, y, z, (int(delta))] #Velocity towards or away from the detector         
             
+            data_gen = [data.get_detection_count(), (detection.depth), ego_vel, detection.azimuth, detection.altitude, ((detection.velocity)), (delta)]
+
+            with open(filename, 'a', newline="") as file:
+                csvwriter = csv.writer(file) 
+                csvwriter.writerow(data_gen)           
 
             #radar_data[i, :] = [x, y, z, abs(delta)<0.1]
-                
-                # mesh_box = o3d.geometry.TriangleMesh.create_box(width = x, height=y,depth=z)
-                # mesh_box.compute_vertex_normals()
-                # mesh_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
-                #     size=0.6, origin=[-2, -2, -2])
-                # o3d.visualization.draw_geometries(mesh_box, mesh_frame)
-                #o3d.visualization.draw_geometries([mesh_box, mesh_frame])
-              
-            #TBD: Any objects other than vehicles and walkers can be considered as stationary 
-    
+        # print('count after: ' + str(count))
+        # print('det_count ' + str(data.get_detection_count()))            
         intensity = np.abs(radar_data[:, -1])    
         # intensity is a measure of detection.velocity 
         intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100)) #np.log(np.exp(-0.004 * 100)= -0.4
@@ -305,36 +296,7 @@ class BasicSensorClients():
         points[:, :1] = -points[:, :1]
         point_list.points = o3d.utility.Vector3dVector(points)
         point_list.colors = o3d.utility.Vector3dVector(int_color)
-        print(radar_data)
-        # if(abs(delta) > 0):            
-        #     point_list.colors = o3d.utility.Vector3dVector([0, 0, 0])
-        # elif(abs(delta) < 0):
-        #     point_list.colors = o3d.utility.Vector3dVector([0, 1, 0])
-        # else:
-        #     point_list.colors = o3d.utility.Vector3dVector([0, 0, 1])
-        
-        # print('int color ' + str(int_color))
-
-        data_gen = [data.get_detection_count(), int(detection.depth), int(abs(detection.velocity)), int(abs(delta))]
-
-        with open(filename, 'a', newline="") as file:
-            csvwriter = csv.writer(file) 
-            csvwriter.writerow(data_gen)
-        
-        #print('detection.depth ' + str(detection.depth))
-
-        # print(abs(detection.velocity))
-
-        # print(data.get_detection_count())
-       
-        # # code convert array into list and measure distance
-        # L = []
-        # pointslist = raw_data_points.tolist()
-        # for i in range(len(pointslist)):
-        #     L.append(pointslist[i-1][-1])
-        
-        # ave = sum(L)/len(L)
-        #print('Ave ' + str(ave)) #average distance of detected objects
+        #print(point_list.points)        
 
     def game_loop(self):
         """
@@ -371,14 +333,14 @@ class BasicSensorClients():
             # Add traffic and set in motion with Traffic Manager
             #self.spawn_vehicles_around_ego_vehicles(ego_vehicle=vehicle, radius=100, spawn_points=spawn_points, numbers_of_vehicles=10)
 
-            for i in range(50): 
-                vehicle_bp = random.choice(bp_lib.filter('vehicle')) 
+            for i in range(10): 
+                #vehicle_bp = random.choice(bp_lib.filter('vehicle.bh.crossbike')) 
+                vehicle_bp = random.choice(bp_lib.filter('*vehicle*'))
                 npc = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))    
                 if npc:
                     npc.set_autopilot(True)  
 
-            #vehicles = self.world.get_actors().filter('vehicle.*')
-                                        
+            #vehicles = self.world.get_actors().filter('vehicle.*')                                        
 
             # Create a queue to store and retrieve the sensor data
             image_queue = queue.Queue()
@@ -482,7 +444,7 @@ class BasicSensorClients():
                             # v = vehicle.get_velocity()
                             # self.update_vehvelocity(v)  
                             npc_vel = npc.get_velocity()                                
-                            tgt_vel = int(math.sqrt(npc_vel.x**2 + npc_vel.y**2 + npc_vel.z**2)) 
+                            tgt_vel = (math.sqrt(npc_vel.x**2 + npc_vel.y**2 + npc_vel.z**2)) 
                             self.set_trgt_veh_vel(tgt_vel)                                                    
 
                             # Filter for the vehicles within 50m same as radar horizontal fov
